@@ -1,1 +1,6 @@
 node_modules
+
+archive/
+*.json.log
+
+.env
