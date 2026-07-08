@@ -1,0 +1,22 @@
+[
+  {
+    "error": "Database timeout",
+    "service": "billing"
+  },
+  {
+    "error": "Null pointer exception",
+    "service": "auth"
+  },
+  {
+    "error": "Failed to load resource",
+    "service": "frontend"
+  },
+  {
+    "error": "Payment gateway down",
+    "service": "payment"
+  },
+  {
+    "error": "Out of memory",
+    "service": "analytics"
+  }
+]
