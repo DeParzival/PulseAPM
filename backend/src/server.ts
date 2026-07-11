@@ -1,8 +1,11 @@
 import express from 'express';
 import { Kafka } from 'kafkajs';
+import authRoutes from './routes/auth.js'
 
 const app = express();
 app.use(express.json());
+
+app.use('/api/routes', authRoutes);
 
 const kafka = new Kafka({
   clientId: 'pulse-apm-ingestion',
