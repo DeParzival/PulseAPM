@@ -1,0 +1,53 @@
+datasource db {
+  provider = "postgresql"
+}
+
+generator client{
+  provider="prisma-client-js"
+}
+
+// A User can own multiple corporate accounts or apps
+model User{
+  id          String      @id @default(uuid())
+  email       String      @unique
+  password    String
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  projects    Project[]
+}
+
+// A Project represents a distinct application being monitored
+model Project{
+  id            String        @id @default(uuid()) 
+  name          String
+  environment   String        @default("production")  // development, staging, produciton
+  createdAt     DateTime      @default(now())
+  userId        String
+  user          User          @relation(fields:[userId], references:[id], onDelete:Cascade)
+  apiKeys       ApiKey[]
+  errorGroups   ErrorGroup[]
+}
+
+// API Keys used by the PulseAgent SDK to securely stream data to our server
+model ApiKey {
+  id        String   @id @default(uuid())
+  key       String   @unique // The actual hashed or secret token string
+  name      String   @default("Default Key")
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+// Error Fingerprinting: Grouping identical errors together so the DB doesn't explode
+model ErrorGroup {
+  id          String   @id @default(uuid())
+  fingerprint String   @unique // SHA-256 hash of error message + stack trace location
+  message     String
+  service     String
+  count       Int      @default(1)
+  firstSeen   DateTime @default(now())
+  lastSeen    DateTime @default(now())
+  projectId   String
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
