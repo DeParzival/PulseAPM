@@ -4,89 +4,116 @@ import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import pg from 'pg';
 import { createClient } from "redis";
+import fs from "fs";
+import path from "path";
 
+// 1. Database Connections
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
-
-// Pass the adapter into Prisma
 const prisma = new PrismaClient({ adapter });
 
-
-
-// connnect to redis
-const redisClient = createClient({url:'redis://localhost:6379'});
+const redisClient = createClient({ url: 'redis://localhost:6379' });
 redisClient.on('error', (err) => console.error('Redis Client Error', err));
 
-// connect to kafa
+// 2. Kafka Broker Configuration
 const kafka = new Kafka({
-    clientId:'pulse-apm-worker',
-    brokers:['localhost:9092']
+    clientId: 'pulse-apm-worker',
+    brokers: ['localhost:9092']
 });
-
 const consumer = kafka.consumer({ groupId: 'pulse-processing-group' });
 
-async function processLog(messageValue:string){
-    const log = JSON.parse(messageValue);
-
-    const {projectId, environment, error, message, service} = log;
-
-    if(!projectId)
-        return;
-
-    // 1. LIVE METRICS AGGREGATION
-    const currentMinute = new Date().toISOString().substring(0, 16); 
-    const metricKey = `metrics:${projectId}:${currentMinute}`;
-
-    // Increment total requests for this minute
-    await redisClient.hIncrBy(metricKey, 'requests', 1);
-    await redisClient.expire(metricKey, 60*60); // Keep this live data in RAM for 1 hour
-
-    // 2. ERROR FINGERPRINTING & DEDUPLICATION
-    if(error){
-        // Increment the error counter on the live scoreboard
-        await redisClient.hIncrBy(metricKey, 'requests', 1);
-
-        // Create a unique string combining the Project ID, Error Name, and where it happened
-        const fingerprintData = `${projectId}:${error.name}:${error.message}:${error.stack?.substring(0, 100) || ''}`;
-
-        // Cryptographically hash that string into a clean, unique 64-character ID
-        const fingerprint = crypto.createHash('sha256').update(fingerprintData).digest('hex');
-
-        // UPSERT: "Update it if it exists, Insert it if it doesn't."
-        await prisma.errorGroup.upsert({
-            where:{fingerprint},
-            update:{
-                count:{ increment:1 },
-                lastSeen : new Date()
-            },
-            create: {
-                fingerprint,
-                message: error.message || message || 'Unknown Error',
-                service: service || 'Unknown service',
-                projectId,
-                count:1
-            }
-        });
-    }
+// 3. Cold Storage Directory Setup (Matches your .gitignore settings)
+const ARCHIVE_DIR = path.join(process.cwd(), 'archive');
+if (!fs.existsSync(ARCHIVE_DIR)) {
+    fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
 }
 
-async function startWorker(){
+async function startWorker() {
     await redisClient.connect();
     await consumer.connect();
+    
+    // Subscribe to the incoming log flow
+    await consumer.subscribe({ topic: 'incoming-logs', fromBeginning: true });
+    console.log('Pulse High-Throughput Batch Worker is online...');
 
-    await consumer.subscribe({topic: 'incoming-logs', fromBeginning: true});
-    console.log('Pulse Worker is online and processing Kafka messages...');
-
+    // Switch from eachMessage to eachBatch to ingest data in bulk chunks
     await consumer.run({
-        eachMessage: async({message}) => {
-            if(!message.value)  return;
-            try {
-                await processLog(message.value.toString());
-            } catch (error) {
-                console.error('Failed to process message from queue:', error);
+        eachBatch: async ({ batch, resolveOffset, heartbeat }) => {
+            console.log(`Received an armful of ${batch.messages.length} messages from Kafka!`);
+            
+            const rawLogLines: string[] = [];
+
+            for (const message of batch.messages) {
+                if (!message.value) continue;
+
+                try {
+                    const log = JSON.parse(message.value.toString());
+                    const { projectId, error, message: msgText, service } = log;
+
+                    if (!projectId) continue;
+
+                    // A. Archive the raw log line for Cold Storage
+                    rawLogLines.push(JSON.stringify(log));
+
+                    // B. Hot Storage: Compute Real-time counters inside Redis
+                    const currentMinute = new Date().toISOString().substring(0, 16); 
+                    const metricKey = `metrics:${projectId}:${currentMinute}`;
+
+                    // Corrected Counter Logic: Track total hits distinctly from errors
+                    await redisClient.hIncrBy(metricKey, 'total_requests', 1);
+                    await redisClient.expire(metricKey, 3600); // Keep hot metrics alive for 1 hour
+
+                    // C. Relational Storage: Process unique errors into PostgreSQL
+                    if (error) {
+                        // Keep a direct counter tally in Redis for immediate UI charting
+                        await redisClient.hIncrBy(metricKey, 'error_requests', 1);
+
+                        // Safe extraction formatting so worker never crashes on raw object variations
+                        const errName = typeof error === 'object' ? error.name : 'ConsoleError';
+                        const errMsg = typeof error === 'object' ? error.message : error;
+                        const errStack = typeof error === 'object' ? error.stack : '';
+
+                        const fingerprintData = `${projectId}:${errName}:${errMsg}:${errStack?.substring(0, 100) || ''}`;
+                        const fingerprint = crypto.createHash('sha256').update(fingerprintData).digest('hex');
+
+                        // Update statistical footprint trends in Postgres
+                        await prisma.errorGroup.upsert({
+                            where: { fingerprint },
+                            update: {
+                                count: { increment: 1 },
+                                lastSeen: new Date()
+                            },
+                            create: {
+                                fingerprint,
+                                message: errMsg || msgText || 'Unknown Exception',
+                                service: service || 'unnamed-service',
+                                projectId,
+                                count: 1
+                            }
+                        });
+                    }
+                } catch (parseError) {
+                    console.error('Skipping broken/corrupted payload line:', parseError);
+                }
+
+                // Tell Kafka we successfully processed this specific message index
+                resolveOffset(message.offset);
             }
+
+            // D. Flush the raw logs directly out to our Cold Storage Archive file
+            if (rawLogLines.length > 0) {
+                const today = new Date().toISOString().split('T')[0];
+                const archiveFilePath = path.join(ARCHIVE_DIR, `${today}.json.log`);
+                
+                // Append lines with newline breaks (\n) for clean JSON-Lines format tracking
+                fs.appendFileSync(archiveFilePath, rawLogLines.join('\n') + '\n');
+                console.log(`Successfully archived ${rawLogLines.length} raw events to cold storage disk.`);
+            }
+
+            // Keep the Kafka connection alive during heavy processing loops
+            await heartbeat();
         }
-    })
+    });
 }
 
 startWorker();
