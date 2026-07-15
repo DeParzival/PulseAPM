@@ -1,4 +1,6 @@
-import { PrismaClient } from "@prisma/client/extension";
+import { PrismaClient } from '@prisma/client';
+import { PrismaPg } from '@prisma/adapter-pg';
+import pg from 'pg';
 import bcrypt from "bcryptjs";
 import {Router, type Request, type Response} from "express";
 import jwt from "jsonwebtoken";
@@ -6,7 +8,11 @@ import crypto from "crypto";
 import { isUint8ClampedArray } from "util/types";
 
 const router=Router();
-const prisma=new PrismaClient();
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+const adapter = new PrismaPg(pool);
+
+// Pass the adapter into Prisma
+const prisma = new PrismaClient({ adapter });
 const JWT_SECRET=process.env.JWT_SECRET || 'fallback_secret'
 
 
@@ -64,7 +70,7 @@ router.post('/projects', async (req:Request, res:Response): Promise<any> => {
         const {name, environment, token} = req.body;
 
         // verify user
-        const decoded = jwt.verify(token, JWT_SECRET) as {userId:String};
+        const decoded = jwt.verify(token, JWT_SECRET) as {userId:string};
 
         // generate an api-key string
         const generatedKey = `pulse_${crypto.randomBytes(16).toString('hex')}`;
@@ -87,7 +93,7 @@ router.post('/projects', async (req:Request, res:Response): Promise<any> => {
         res.status(201).json({
             message:'Project created successfully',
             projectId: newProject.id,
-            apiKey: newProject.apiKeys[0].key
+            apiKey: newProject?.apiKeys[0]?.key
         });
 
     } catch (error) {

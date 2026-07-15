@@ -1,9 +1,17 @@
 import { Kafka } from "kafkajs";
 import crypto from "crypto";
 import { PrismaClient } from '@prisma/client';
+import { PrismaPg } from '@prisma/adapter-pg';
+import pg from 'pg';
 import { createClient } from "redis";
 
-const prisma = new PrismaClient();
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+const adapter = new PrismaPg(pool);
+
+// Pass the adapter into Prisma
+const prisma = new PrismaClient({ adapter });
+
+
 
 // connnect to redis
 const redisClient = createClient({url:'redis://localhost:6379'});

@@ -1,13 +1,18 @@
-import { PrismaClient } from "@prisma/client/extension";
+import { PrismaClient } from '@prisma/client';
+import { PrismaPg } from '@prisma/adapter-pg';
+import pg from 'pg';
 import {type Request, type Response, type NextFunction} from "express";
 import { error } from "node:console";
 
-const prisma = new PrismaClient;
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+const adapter = new PrismaPg(pool);
 
+// Pass the adapter into Prisma
+const prisma = new PrismaClient({ adapter });
 
 export interface AuthenticateRequest extends Request{
-    projectId?:String,
-    environment?:String
+    projectId?:string,
+    environment?:string
 };
 
 export const validateApiKey = async (req:AuthenticateRequest, res:Response, next:NextFunction): Promise<any> => {
@@ -20,7 +25,7 @@ export const validateApiKey = async (req:AuthenticateRequest, res:Response, next
         // look up the key in postgreSQL
         const foundKey = await prisma.apiKey.findUnique({
             where:{key:apiKey},
-            include:{projecct:true}
+            include:{project:true}
         });
 
         // if the key doesn't exist or been deactivated by the user, block the request

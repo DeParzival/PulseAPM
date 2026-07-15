@@ -4,19 +4,23 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev:server": "npx tsx src/server.ts",
+    "dev:worker": "npx tsx src/workers/worker.ts",
+    "dev": "concurrently -n \"API,WRK\" -c \"cyan,magenta\" \"npm run dev:server\" \"npm run dev:worker\""
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "@prisma/adapter-pg": "^7.8.0",
     "@prisma/client": "^7.8.0",
     "bcryptjs": "^3.0.3",
     "express": "^5.2.1",
     "jsonwebtoken": "^9.0.3",
     "kafkajs": "^2.2.4",
     "nodemon": "^3.1.14",
+    "pg": "^8.22.0",
     "redis": "^6.1.0"
   },
   "devDependencies": {
@@ -24,6 +28,8 @@
     "@types/express": "^5.0.6",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^26.1.1",
+    "@types/pg": "^8.20.0",
+    "concurrently": "^10.0.3",
     "prisma": "^7.8.0",
     "typescript": "^7.0.2"
   }
