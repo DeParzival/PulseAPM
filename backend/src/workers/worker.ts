@@ -5,6 +5,7 @@ import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import pg from 'pg';
 import { createClient } from "redis";
+import { checkAlertThreshold } from '../services/alertEngine.js';
 
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -75,6 +76,8 @@ async function startWorker() {
                                 incrementCount: 1
                             });
                         }
+
+                        await checkAlertThreshold(projectId, log.environment || 'production');
                     }
                 } catch (parseError) {
                     console.error('Found un-parseable event payload line:', parseError);
