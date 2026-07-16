@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express from 'express';
 import { Kafka } from 'kafkajs';
 import { Server } from 'socket.io';
@@ -58,7 +59,7 @@ io.on('connection', (socket) => {
   console.log(`Browser connected to Dashboard Live Feed: ${socket.id}`);
 
   // When the UI loads a project dashboard, it asks to join a "room" for that specific project
-    socket.on('subscribe', (projectId) => {
+    socket.on('subscribe', (projectId: string) => {
         socket.join(projectId);
         console.log(`User subscribed to live updates for project: ${projectId}`);
     });

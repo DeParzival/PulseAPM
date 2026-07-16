@@ -1,4 +1,4 @@
-// src/workers/worker.ts
+import 'dotenv/config';
 import { Kafka } from "kafkajs";
 import crypto from "crypto";
 import { PrismaClient } from '@prisma/client';
