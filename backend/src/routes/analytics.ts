@@ -2,8 +2,7 @@ import {Router, type Request, type Response} from "express";
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import pg from 'pg';
-import { timeStamp } from "node:console";
-import type { tryCatch } from "bullmq";
+
 
 const router = Router();
 const pool = new pg.Pool({connectionString: process.env.DATABASE_URL});
@@ -13,7 +12,7 @@ const prisma = new PrismaClient({adapter});
 // 1. Fetch Historical Chart Data
 router.get('/history/:projectId', async (req: Request, res: Response): Promise<any> => {
     try {
-        const {projectId} = req.params;
+        const projectId = req.params.projectId as string;
         const hoursAgo = parseInt(req.query.hours as string ) || 24;
 
         const cutoffDate = new Date();
@@ -23,9 +22,9 @@ router.get('/history/:projectId', async (req: Request, res: Response): Promise<a
         const history = await prisma.metricSummary.findMany({
             where:{
                 projectId,
-                timeStamp: {gte: cutoffDate}
+                timestamp: {gte: cutoffDate}
             },
-            orderBy: {timeStamp: 'asc'}
+            orderBy: {timestamp: 'asc'}
         });
 
         res.json(history);
@@ -39,7 +38,7 @@ router.get('/history/:projectId', async (req: Request, res: Response): Promise<a
 // 2. Fetch Top Recurring Errors
 router.get('/errors/:projectId', async (req:Request, res:Response): Promise<any> => {
     try {
-        const {projectId} = req.params;
+        const projectId = req.params.projectId as string;
 
         // Fetch the 10 most frequent bugs, just like Sentry.io does
         const topErrors = await prisma.errorGroup.findMany({

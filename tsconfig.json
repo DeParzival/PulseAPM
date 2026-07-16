@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "baseUrl": ".",
+    "paths": {
+      "*": ["backend/*"],
+      "@prisma/client": ["backend/node_modules/@prisma/client"]
+    },
+    "skipLibCheck": true
+  },
+  "include": ["backend/**/*"]
+}

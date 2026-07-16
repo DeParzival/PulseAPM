@@ -54,7 +54,7 @@ app.post('/api/logs', validateApiKey, rateLimiter,async (req: AuthenticateReques
 // Websocket
 const redisClient = createClient({url: 'redis://localhost:6379'});
 
-io.on('conneciton', (socket) => {
+io.on('connection', (socket) => {
   console.log(`Browser connected to Dashboard Live Feed: ${socket.id}`);
 
   // When the UI loads a project dashboard, it asks to join a "room" for that specific project
