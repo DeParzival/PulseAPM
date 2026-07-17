@@ -51,6 +51,28 @@ model ErrorGroup {
   lastSeen    DateTime @default(now())
   projectId   String
   project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  occurrences ErrorOccurrence[]
+}
+
+// Stores each individual crash instance with rich JSON details
+model ErrorOccurrence {
+  id                     String     @id @default(uuid())
+  errorGroupFingerprint  String
+  errorGroup             ErrorGroup @relation(fields: [errorGroupFingerprint], references: [fingerprint], onDelete: Cascade)
+  message                String
+  
+  // Native PostgreSQL JSONB columns for flexible schemas
+  breadcrumbs            Json?      
+  telemetry              Json?      
+  
+  environment            String     @default("production")
+  releaseVersion         String?    // Track deployment version (e.g. "v1.2.4")
+  createdAt              DateTime   @default(now())
+
+  @@index([errorGroupFingerprint])
+  @@index([environment])
+  @@index([releaseVersion])
+  @@index([createdAt])
 }
 
 // Historical Time-Series Data: Saving minute-by-minute traffic summaries

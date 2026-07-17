@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { Kafka, type Producer } from "kafkajs";
+import { Kafka } from "kafkajs";
 import crypto from "crypto";
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
@@ -64,6 +64,16 @@ async function startWorker() {
                 incrementCount: number;
             }>();
 
+            // Array to store individual occurrences to bulk-insert later
+            const occurrencesToCreate: Array<{
+                errorGroupFingerprint: string,
+                message: string,
+                breadcrumbs: any,
+                telemetry: any,
+                environment: string,
+                releaseVersion: string | null;
+            }>=[];
+
             for (const message of batch.messages) {
                 if (!message.value) {
                     resolveOffset(message.offset);
@@ -82,7 +92,7 @@ async function startWorker() {
                     continue;
                 }
 
-                const { projectId, error, message: textMsg, service } = log;
+                const { projectId, error, message: textMsg, service, environment, breadcrumbs, telemetry, releaseVersion } = log;
 
                 // 2. Validate essential fields (e.g., projectId) before processing
                 if (!projectId) {
@@ -124,6 +134,15 @@ async function startWorker() {
                             });
                         }
 
+                        occurrencesToCreate.push({
+                            errorGroupFingerprint: fingerprint,
+                            message: errMsg || textMsg || 'Unknown Error Payload',
+                            breadcrumbs: breadcrumbs ? JSON.stringify(breadcrumbs) : null,
+                            telemetry: telemetry ? JSON.stringify(telemetry) : null,
+                            environment: environment || 'production',
+                            releaseVersion: releaseVersion || 'v1.0.0'
+                        });
+
                         await checkAlertThreshold(projectId, log.environment || 'production');
                     }
                 } catch (processingError: any) {
@@ -152,6 +171,15 @@ async function startWorker() {
                         count: metadata.incrementCount
                     }
                 });
+            }
+
+            // Bulk-insert individual occurrences in a single optimized database trip
+            if (occurrencesToCreate.length > 0) {
+                await prisma.errorOccurrence.createMany({
+                    data: occurrencesToCreate,
+                    skipDuplicates: false
+                });
+                console.log(`Successfully bulk-inserted ${occurrencesToCreate.length} individual occurrences.`);
             }
 
             console.log(`Completed processing and synchronized database metrics states.`);
