@@ -80,10 +80,10 @@ model MetricSummary {
   id            String   @id @default(uuid())
   projectId     String
   project       Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  timestamp     DateTime // The exact minute these metrics represent
+  timeStamp     DateTime // The exact minute these metrics represent
   totalRequests Int      @default(0)
   errorRequests Int      @default(0)
 
   // This ensures we never accidentally double-count the same minute for the same project
-  @@unique([projectId, timestamp])
+  @@unique([projectId, timeStamp])
 }
