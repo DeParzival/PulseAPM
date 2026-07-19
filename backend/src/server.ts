@@ -26,6 +26,10 @@ const kafka = new Kafka({
 });
 const producer = kafka.producer();
 
+// Environment-aware middleware toggle for benchmarking
+const isBenchmark = process.env.NODE_ENV === 'benchmark';
+const targetRateLimiter = isBenchmark ? (_req: any, _res: any, next: any) => next() : rateLimiter;
+
 app.post('/api/logs', validateApiKey, rateLimiter,async (req: AuthenticateRequest, res) => {
   try{
     const logData = req.body;
@@ -89,8 +93,24 @@ setInterval( async () => {
 async function startServer() {
   await producer.connect();
   console.log('Connected to Kafka Ticket Wheel!');
+
+  await redisClient.connect();
+  console.log('Connected to Redis Cache Engine!');
+
+  // Automatically seed the k6 testing key directly into Redis if in benchmark mode
+  if (isBenchmark) {
+    await redisClient.set(
+      'api_key_meta:test_live_key_123',
+      JSON.stringify({
+        projectId: 'proj_bench_99',
+        environment: 'production',
+        isActive: true
+      })
+    );
+    console.log('Benchmark API Key pre-warmed in Redis cache memory.');
+  }
   
-  app.listen(3000, () => {
+  httpServer.listen(3000, () => {
     console.log('Waiter (Express) is listening on port 3000!');
   });
 }

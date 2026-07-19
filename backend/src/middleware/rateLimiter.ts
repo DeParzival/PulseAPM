@@ -11,6 +11,12 @@ const WINDOW_SIZE_IN_SECONDS = 60;
 const MAX_REQUESTS_PER_WINDOW = 60;
 
 export const rateLimiter = async (req: AuthenticateRequest, res: Response, next: NextFunction): Promise<any> => {
+
+    // Bypass rate limiting during performance benchmarks
+    if (process.env.DISABLE_RATE_LIMIT === 'true' || process.env.NODE_ENV === 'test') {
+        return next();
+    }
+    
     const projectId = req.projectId;
     if(!projectId)
         return res.status(500).json({error:'Rate limiting failed. Project context missing'});
