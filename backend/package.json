@@ -6,7 +6,9 @@
   "scripts": {
     "dev:server": "npx tsx src/server.ts",
     "dev:worker": "npx tsx src/workers/worker.ts",
-    "dev": "concurrently -n \"API,WRK\" -c \"cyan,magenta\" \"npm run dev:server\" \"npm run dev:worker\""
+    "dev": "concurrently -n \"API,WRK\" -c \"cyan,magenta\" \"npm run dev:server\" \"npm run dev:worker\"",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "keywords": [],
   "author": "",
@@ -37,6 +39,7 @@
     "@types/socket.io": "^3.0.1",
     "concurrently": "^10.0.3",
     "prisma": "^7.8.0",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
   }
 }
