@@ -26,7 +26,7 @@ export const rateLimiter = async (req: AuthenticateRequest, res: Response, next:
             await redisClient.expire(redisKey, WINDOW_SIZE_IN_SECONDS);
 
         if(requestMade>MAX_REQUESTS_PER_WINDOW)
-            res.status(429).json({
+            return res.status(429).json({
                 error:'Too many requests. Your API key rate limit has been exceeded. Please slow down.'
         });
 
