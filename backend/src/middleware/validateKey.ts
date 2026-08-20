@@ -1,17 +1,6 @@
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import pg from 'pg';
-import { type Request, type Response, type NextFunction } from "express";
-import { createClient } from "redis";
-
-// Connect to PostgreSQL 
-const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
-
-// Connect to ultra-fast Redis Cache Guard
-const redisClient = createClient({ url: 'redis://localhost:6379' });
-redisClient.connect().catch(console.error);
+import { type Request, type Response, type NextFunction } from 'express';
+import { prisma } from '../lib/prisma.js';
+import { redisClient } from '../lib/redis.js';
 
 export interface AuthenticateRequest extends Request {
     projectId?: string;

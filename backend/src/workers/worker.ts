@@ -1,23 +1,37 @@
 import 'dotenv/config';
-import { Kafka } from "kafkajs";
-import crypto from "crypto";
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import pg from 'pg';
-import { createClient } from "redis";
+import crypto from 'crypto';
+import { prisma } from '../lib/prisma.js';
+import { redisClient } from '../lib/redis.js';
+import { kafka } from '../lib/kafka.js';
 import { checkAlertThreshold } from '../services/alertEngine.js';
+import fs from 'fs/promises';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
-const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const ARCHIVE_DIR = path.join(__dirname, '../../archive');
+const BATCH_SIZE = 1000;
 
-const redisClient = createClient({ url: 'redis://localhost:6379' });
-redisClient.connect().catch(console.error);
+// Local batch buffer for cold storage (Worker B)
+let coldStorageBatch: any[] = [];
+let batchFileCounter = 0;
 
-const kafka = new Kafka({
-    clientId: 'pulse-apm-worker',
-    brokers: ['localhost:9092']
-});
+async function flushColdStorageBatch() {
+  if (coldStorageBatch.length === 0) return;
+  
+  await fs.mkdir(ARCHIVE_DIR, { recursive: true });
+  
+  const timestamp = Date.now();
+  const fileName = `batch-${timestamp}-${batchFileCounter++}.json.log`;
+  const filePath = path.join(ARCHIVE_DIR, fileName);
+  
+  const data = coldStorageBatch.map(item => JSON.stringify(item)).join('\n');
+  await fs.writeFile(filePath, data);
+  console.log(`[Worker B] Flushed ${coldStorageBatch.length} raw logs to ${fileName}`);
+  
+  coldStorageBatch = [];
+}
 
 const consumer = kafka.consumer({ groupId: 'pulse-processing-group' });
 
@@ -45,10 +59,41 @@ async function sendToDLQ(rawMessageValue: Buffer, reason: string, originalOffset
     }
 }
 
+/**
+ * Normalize incoming error payloads to handle both formats:
+ * - Structured: { error: { name, message, stack } }
+ * - Flat (load-test): { type, message, location }
+ */
+function normalizeError(log: any): { name: string; message: string; stack: string } | null {
+  if (log.error && typeof log.error === 'object') {
+    return {
+      name: log.error.name || 'UnknownError',
+      message: log.error.message || log.message || 'Unknown error',
+      stack: log.error.stack || ''
+    };
+  }
+  if (log.error && typeof log.error === 'string') {
+    return {
+      name: 'UncaughtException',
+      message: log.error,
+      stack: ''
+    };
+  }
+  // Handle flat format from load-test.js (type + message at root)
+  if (log.status === 'error' && log.type) {
+    return {
+      name: log.type,
+      message: log.message || 'Unknown error',
+      stack: log.location ? `at ${log.location}` : ''
+    };
+  }
+  return null;
+}
+
 async function startWorker() {
     await consumer.connect();
-    await dlqProducer.connect(); // Connect the DLQ helper producer
-    await consumer.subscribe({ topic: 'incoming-logs', fromBeginning: true });
+    await dlqProducer.connect();
+    await consumer.subscribe({ topic: 'incoming-logs', fromBeginning: false });
     
     console.log('Pulse High-Throughput Worker is online with DLQ Recovery integration...');
 
@@ -72,7 +117,7 @@ async function startWorker() {
                 telemetry: any,
                 environment: string,
                 releaseVersion: string | null;
-            }>=[];
+            }> = [];
 
             for (const message of batch.messages) {
                 if (!message.value) {
@@ -92,7 +137,7 @@ async function startWorker() {
                     continue;
                 }
 
-                const { projectId, error, message: textMsg, service, environment, breadcrumbs, telemetry, releaseVersion } = log;
+                const { projectId, message: textMsg, service, environment, breadcrumbs, telemetry, releaseVersion } = log;
 
                 // 2. Validate essential fields (e.g., projectId) before processing
                 if (!projectId) {
@@ -108,17 +153,15 @@ async function startWorker() {
                     const metricKey = `metrics:${projectId}:${currentMinute}`;
                     
                     await redisClient.hIncrBy(metricKey, 'total_requests', 1);
-                    await redisClient.expire(metricKey, 3600); // Live details persist for 1 hour
+                    await redisClient.expire(metricKey, 3600);
 
-                    if (error) {
+                    // Normalize the error payload (handles both structured and flat formats)
+                    const normalizedError = normalizeError(log);
+
+                    if (normalizedError) {
                         await redisClient.hIncrBy(metricKey, 'error_requests', 1);
 
-                        // Secure extraction logic ensuring text strings don't crash the signature step
-                        const errName = typeof error === 'object' ? error.name : 'UncaughtException';
-                        const errMsg = typeof error === 'object' ? error.message : error;
-                        const errStack = typeof error === 'object' ? error.stack : '';
-
-                        const fingerprintData = `${projectId}:${errName}:${errMsg}:${errStack?.substring(0, 100) || ''}`;
+                        const fingerprintData = `${projectId}:${normalizedError.name}:${normalizedError.message}:${normalizedError.stack?.substring(0, 100) || ''}`;
                         const fingerprint = crypto.createHash('sha256').update(fingerprintData).digest('hex');
 
                         // Aggregate counts inside local memory buffer
@@ -127,7 +170,7 @@ async function startWorker() {
                             existing.incrementCount += 1;
                         } else {
                             errorAggregationMap.set(fingerprint, {
-                                message: errMsg || textMsg || 'Unknown Error Payload',
+                                message: normalizedError.message || textMsg || 'Unknown Error Payload',
                                 service: service || 'unnamed-service',
                                 projectId,
                                 incrementCount: 1
@@ -136,14 +179,20 @@ async function startWorker() {
 
                         occurrencesToCreate.push({
                             errorGroupFingerprint: fingerprint,
-                            message: errMsg || textMsg || 'Unknown Error Payload',
+                            message: normalizedError.message || textMsg || 'Unknown Error Payload',
                             breadcrumbs: breadcrumbs ? JSON.stringify(breadcrumbs) : null,
                             telemetry: telemetry ? JSON.stringify(telemetry) : null,
                             environment: environment || 'production',
-                            releaseVersion: releaseVersion || 'v1.0.0'
+                            releaseVersion: releaseVersion || null
                         });
 
                         await checkAlertThreshold(projectId, log.environment || 'production');
+                    }
+
+                    // Worker B: Append raw log to cold storage batch
+                    coldStorageBatch.push(log);
+                    if (coldStorageBatch.length >= BATCH_SIZE) {
+                      await flushColdStorageBatch();
                     }
                 } catch (processingError: any) {
                     // Isolation for runtime database failures while dealing with bad payload inputs
@@ -189,5 +238,11 @@ async function startWorker() {
         }
     });
 }
+
+// Flush remaining batch on shutdown
+process.on('SIGTERM', async () => {
+  await flushColdStorageBatch();
+  process.exit(0);
+});
 
 startWorker();

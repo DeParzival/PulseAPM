@@ -1,30 +1,25 @@
-import {Router, type Request, type Response} from "express";
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import pg from 'pg';
-
+import { Router, type Request, type Response } from 'express';
+import { prisma } from '../lib/prisma.js';
+import { redisClient } from '../lib/redis.js';
 
 const router = Router();
-const pool = new pg.Pool({connectionString: process.env.DATABASE_URL});
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({adapter});
 
 // 1. Fetch Historical Chart Data
 router.get('/history/:projectId', async (req: Request, res: Response): Promise<any> => {
     try {
         const projectId = req.params.projectId as string;
-        const hoursAgo = parseInt(req.query.hours as string ) || 24;
+        const hoursAgo = parseInt(req.query.hours as string) || 24;
 
         const cutoffDate = new Date();
-        cutoffDate.setHours(cutoffDate.getHours()-hoursAgo);
+        cutoffDate.setHours(cutoffDate.getHours() - hoursAgo);
 
         // Fetch aggregated 5-minute summaries sorted chronologically
         const history = await prisma.metricSummary.findMany({
-            where:{
+            where: {
                 projectId,
-                timestamp: {gte: cutoffDate}
+                timeStamp: { gte: cutoffDate }
             },
-            orderBy: {timestamp: 'asc'}
+            orderBy: { timeStamp: 'asc' }
         });
 
         res.json(history);
@@ -33,18 +28,18 @@ router.get('/history/:projectId', async (req: Request, res: Response): Promise<a
         console.error('Failed to fetch historical metrics:', error);
         res.status(500).json({ error: 'Failed to fetch historical chart data' });
     }
-})
+});
 
 // 2. Fetch Top Recurring Errors
-router.get('/errors/:projectId', async (req:Request, res:Response): Promise<any> => {
+router.get('/errors/:projectId', async (req: Request, res: Response): Promise<any> => {
     try {
         const projectId = req.params.projectId as string;
 
         // Fetch the 10 most frequent bugs, just like Sentry.io does
         const topErrors = await prisma.errorGroup.findMany({
-            where:{projectId},
-            orderBy: {count:'asc'},
-            take:10
+            where: { projectId },
+            orderBy: { count: 'desc' },
+            take: 10
         });
 
         res.json(topErrors);
@@ -60,7 +55,7 @@ router.get('/error-group/:fingerprint', async (req: Request, res: Response): Pro
     try {
         const fingerprint = req.params.fingerprint as string;
         const page = parseInt(req.query.page as string) || 1;
-        const limit = parseInt(req.query.limit as string) || 5; // Fetch 5 occurrences at a time
+        const limit = parseInt(req.query.limit as string) || 5;
 
         const errorGroup = await prisma.errorGroup.findUnique({
             where: { fingerprint }
@@ -96,6 +91,69 @@ router.get('/error-group/:fingerprint', async (req: Request, res: Response): Pro
     } catch (error) {
         console.error('Failed to fetch Error Group details:', error);
         res.status(500).json({ error: 'Failed to fetch occurrence details' });
+    }
+});
+
+// 4. Dashboard Overview — combined live + historical summary
+router.get('/overview/:projectId', async (req: Request, res: Response): Promise<any> => {
+    try {
+        const projectId = req.params.projectId as string;
+
+        // Get live metrics from Redis
+        const currentMinute = new Date().toISOString().substring(0, 16);
+        const metricKey = `metrics:${projectId}:${currentMinute}`;
+        
+        let liveMetrics = { totalRequests: 0, errorRequests: 0 };
+        try {
+          const liveData = await redisClient.hGetAll(metricKey);
+          liveMetrics = {
+            totalRequests: parseInt(liveData.total_requests || '0', 10),
+            errorRequests: parseInt(liveData.error_requests || '0', 10)
+          };
+        } catch {
+          // Redis may not be available
+        }
+
+        // Get recent historical totals (last 1 hour)
+        const oneHourAgo = new Date();
+        oneHourAgo.setHours(oneHourAgo.getHours() - 1);
+
+        const recentMetrics = await prisma.metricSummary.findMany({
+            where: {
+                projectId,
+                timeStamp: { gte: oneHourAgo }
+            }
+        });
+
+        const hourlyTotals = recentMetrics.reduce(
+            (acc, m) => ({
+                totalRequests: acc.totalRequests + m.totalRequests,
+                errorRequests: acc.errorRequests + m.errorRequests
+            }),
+            { totalRequests: 0, errorRequests: 0 }
+        );
+
+        // Get error group count
+        const errorGroupCount = await prisma.errorGroup.count({
+            where: { projectId }
+        });
+
+        // Get project info
+        const project = await prisma.project.findUnique({
+            where: { id: projectId },
+            select: { name: true, environment: true, createdAt: true }
+        });
+
+        res.json({
+            project,
+            live: liveMetrics,
+            hourly: hourlyTotals,
+            errorGroupCount
+        });
+
+    } catch (error) {
+        console.error('Failed to fetch overview:', error);
+        res.status(500).json({ error: 'Failed to fetch overview data' });
     }
 });
 

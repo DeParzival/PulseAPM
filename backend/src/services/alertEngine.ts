@@ -1,15 +1,11 @@
-import { createClient } from 'redis';
+import { redisClient } from '../lib/redis.js';
+import { prisma } from '../lib/prisma.js';
 import { sendDiscordWebhook } from './alertNotifier.js';
 
-const redisClient = createClient({ url: 'redis://localhost:6379' });
-if (!redisClient.isOpen) {
-  await redisClient.connect();
-}
-
 interface TemporaryAlertRule {
-  threshold: number;     // Number of errors allowed before barking
-  windowMinutes: number; // Duration of window
-  webhookUrl: string;    // Where to ship notifications
+  threshold: number;
+  windowMinutes: number;
+  webhookUrl: string;
 }
 
 // If any project encounters more than 5 errors in 1 minute, sound the alarm!
@@ -20,7 +16,7 @@ const GLOBAL_ALERT_RULE: TemporaryAlertRule = {
 };
 
 export async function checkAlertThreshold(projectId: string, environment: string): Promise<void> {
-  const currentMinute = new Date().toISOString().substring(0, 16); // e.g., "2026-03-30T14:25"
+  const currentMinute = new Date().toISOString().substring(0, 16);
   const alertCounterKey = `alerts:count:${projectId}:${currentMinute}`;
   const cooldownKey = `alerts:cooldown:${projectId}`;
 
@@ -42,9 +38,21 @@ export async function checkAlertThreshold(projectId: string, environment: string
       // Set a 5-minute cooldown key so we don't fire an alert on the next incoming error ticket
       await redisClient.set(cooldownKey, 'active', { EX: 300 });
 
+      // Resolve the actual project name from the database
+      let projectName = 'Unknown Project';
+      try {
+        const project = await prisma.project.findUnique({
+          where: { id: projectId },
+          select: { name: true }
+        });
+        if (project) projectName = project.name;
+      } catch {
+        // Fall back to generic name if DB lookup fails
+      }
+
       // 3. Fire out the webhook alert payload!
       await sendDiscordWebhook({
-        projectName: 'Production Service', // Fallback name representation
+        projectName,
         projectId,
         environment,
         errorCount: currentErrorVolume,

@@ -1,37 +1,46 @@
 import 'dotenv/config';
 import express from 'express';
-import { Kafka } from 'kafkajs';
 import { Server } from 'socket.io';
 import authRoutes from './routes/auth.js';
 import analyticRoutes from './routes/analytics.js';
 import { validateApiKey, type AuthenticateRequest } from './middleware/validateKey.js';
 import { rateLimiter } from './middleware/rateLimiter.js';
 import { createServer } from 'node:http';
-import { createClient } from 'redis';
+import { redisClient } from './lib/redis.js';
+import { kafka } from './lib/kafka.js';
 
 const app = express();
-
 const httpServer = createServer(app);
-const io = new Server(httpServer, {cors: {origin: '*'}});
+const io = new Server(httpServer, { cors: { origin: '*' } });
 
+// Middleware
 app.use(express.json());
+
+// CORS for dashboard
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, x-api-key, Authorization');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  if (req.method === 'OPTIONS') {
+    res.sendStatus(200);
+    return;
+  }
+  next();
+});
+
 app.use('/api/auth', authRoutes);
 app.use('/api/analytics', analyticRoutes);
 
+// Health check endpoint
+app.get('/api/health', (_req, res) => {
+  res.json({ status: 'ok', uptime: process.uptime(), timestamp: new Date().toISOString() });
+});
 
 // Kafka ingestion
-const kafka = new Kafka({
-  clientId: 'pulse-apm-ingestion',
-  brokers: ['localhost:9092']
-});
 const producer = kafka.producer();
 
-// Environment-aware middleware toggle for benchmarking
-const isBenchmark = process.env.NODE_ENV === 'benchmark';
-const targetRateLimiter = isBenchmark ? (_req: any, _res: any, next: any) => next() : rateLimiter;
-
-app.post('/api/logs', validateApiKey, rateLimiter,async (req: AuthenticateRequest, res) => {
-  try{
+app.post('/api/logs', validateApiKey, rateLimiter, async (req: AuthenticateRequest, res) => {
+  try {
     const logData = req.body;
     
     // enrich the incoming data by baking the verified projectId directly into the message
@@ -50,69 +59,64 @@ app.post('/api/logs', validateApiKey, rateLimiter,async (req: AuthenticateReques
     });
 
     res.status(202).send({ message: 'Log safely checked by security and received in Kafka!' });
-  } catch(error){
+  } catch (error) {
     console.error('Failed to stream log to Kafka queue:', error);
-    res.status(500).json({error: 'Internal pipeline error processing log data'});
+    res.status(500).json({ error: 'Internal pipeline error processing log data' });
   }
 });
 
-// Websocket
-const redisClient = createClient({url: 'redis://localhost:6379'});
-
+// WebSocket
 io.on('connection', (socket) => {
   console.log(`Browser connected to Dashboard Live Feed: ${socket.id}`);
 
   // When the UI loads a project dashboard, it asks to join a "room" for that specific project
-    socket.on('subscribe', (projectId: string) => {
-        socket.join(projectId);
-        console.log(`User subscribed to live updates for project: ${projectId}`);
-    });
+  socket.on('subscribe', (projectId: string) => {
+    socket.join(projectId);
+    console.log(`User subscribed to live updates for project: ${projectId}`);
+  });
 });
 
-setInterval( async () => {
-  // Get all projects that currently have someone looking at their dashboard
-  const activeProjects = Array.from(io.sockets.adapter.rooms.keys());
+setInterval(async () => {
+  // Get all rooms, then filter out socket-id rooms by checking against the sids map
+  const rooms = io.sockets.adapter.rooms;
+  const sids = io.sockets.adapter.sids;
 
-  for(const projectId of activeProjects){
-    if(projectId.startsWith('socket'))  continue;
+  for (const [roomId] of rooms) {
+    // Skip rooms that are just individual socket IDs
+    if (sids.has(roomId)) continue;
 
     const currentMinute = new Date().toISOString().substring(0, 16);
-    const metricKey = `metrics:${projectId}:${currentMinute}`;
+    const metricKey = `metrics:${roomId}:${currentMinute}`;
 
-    const liveData = await redisClient.hGetAll(metricKey);
+    try {
+      const liveData = await redisClient.hGetAll(metricKey);
 
-    // Push the ticking numbers straight into the user's browser!
-    io.to(projectId).emit('live-metrics', {
+      // Push the ticking numbers straight into the user's browser!
+      io.to(roomId).emit('live-metrics', {
         totalRequests: parseInt(liveData.total_requests || '0', 10),
         errorRequests: parseInt(liveData.error_requests || '0', 10)
-    });
-
+      });
+    } catch (err) {
+      // Silently skip if Redis is temporarily unavailable
+    }
   }
 }, 1000);
 
 async function startServer() {
   await producer.connect();
-  console.log('Connected to Kafka Ticket Wheel!');
-
-  await redisClient.connect();
-  console.log('Connected to Redis Cache Engine!');
-
-  // Automatically seed the k6 testing key directly into Redis if in benchmark mode
-  if (isBenchmark) {
-    await redisClient.set(
-      'api_key_meta:test_live_key_123',
-      JSON.stringify({
-        projectId: 'proj_bench_99',
-        environment: 'production',
-        isActive: true
-      })
-    );
-    console.log('Benchmark API Key pre-warmed in Redis cache memory.');
-  }
+  console.log('Connected to Kafka!');
   
   httpServer.listen(3000, () => {
-    console.log('Waiter (Express) is listening on port 3000!');
+    console.log('PulseAPM API Server is listening on port 3000');
   });
 }
+
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  console.log('Shutting down gracefully...');
+  await producer.disconnect();
+  httpServer.close();
+  process.exit(0);
+});
 
 startServer();

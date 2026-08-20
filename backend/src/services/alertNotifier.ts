@@ -1,5 +1,4 @@
 import axios from "axios";
-import type { tryCatch } from "bullmq";
 
 interface AlertPayload{
     projectName:string,

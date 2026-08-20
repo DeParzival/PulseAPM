@@ -6,7 +6,8 @@
   "scripts": {
     "dev:server": "npx tsx src/server.ts",
     "dev:worker": "npx tsx src/workers/worker.ts",
-    "dev": "concurrently -n \"API,WRK\" -c \"cyan,magenta\" \"npm run dev:server\" \"npm run dev:worker\"",
+    "dev:cron": "npx tsx src/workers/cron.ts",
+    "dev": "concurrently -n \"API,WRK,CRON\" -c \"cyan,magenta,yellow\" \"npm run dev:server\" \"npm run dev:worker\" \"npm run dev:cron\"",
     "test": "vitest run",
     "test:watch": "vitest"
   },
