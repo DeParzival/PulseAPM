@@ -1,178 +1,257 @@
-"use client";
+'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { io, Socket } from 'socket.io-client';
+import Header from './components/Header';
+import StatCard from './components/StatCard';
+import LiveChart from './components/LiveChart';
+import ErrorPanel from './components/ErrorPanel';
 
-interface ExceptionPayload {
-  id: string;
-  type: string;
-  message: string;
-  location: string;
-  timeAgo: string;
+const SOCKET_URL = 'http://localhost:3000';
+const API_BASE = 'http://localhost:3000';
+
+interface HistoryPoint {
+  timeStamp: string;
+  totalRequests: number;
+  errorRequests: number;
 }
 
 export default function Dashboard() {
-  const [totalRequests, setTotalRequests] = useState<number>(0);
-  const [errorRate, setErrorRate] = useState<number>(0);
-  const [chartHistory, setChartHistory] = useState<number[]>(new Array(20).fill(0));
+  const [projectId, setProjectId] = useState('proj_bench_99');
+  const [connectionStatus, setConnectionStatus] = useState<'connected' | 'disconnected' | 'reconnecting'>('disconnected');
   
-  const [exceptions] = useState<ExceptionPayload[]>([
-    {
-      id: '1',
-      type: 'TypeError',
-      message: "Cannot read properties of undefined (reading 'map')",
-      location: '/api/v1/checkout.ts • line 42',
-      timeAgo: 'Just now'
-    }
-  ]);
+  // Live metrics
+  const [totalRequests, setTotalRequests] = useState(0);
+  const [errorRequests, setErrorRequests] = useState(0);
+  const [errorRate, setErrorRate] = useState(0);
+  const [chartHistory, setChartHistory] = useState<number[]>(new Array(30).fill(0));
+  const [chartLabels, setChartLabels] = useState<string[]>(new Array(30).fill(''));
 
+  // Historical data
+  const [historyData, setHistoryData] = useState<number[]>([]);
+  const [historyLabels, setHistoryLabels] = useState<string[]>([]);
+  const [historyErrors, setHistoryErrors] = useState<number[]>([]);
+
+  // Overview
+  const [hourlyTotal, setHourlyTotal] = useState(0);
+  const [hourlyErrors, setHourlyErrors] = useState(0);
+  const [errorGroupCount, setErrorGroupCount] = useState(0);
+  const [projectName, setProjectName] = useState('');
+  
+  // Uptime
+  const [uptime, setUptime] = useState(0);
+
+  // Fetch historical chart data
+  const fetchHistory = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/analytics/history/${projectId}?hours=1`);
+      if (res.ok) {
+        const data: HistoryPoint[] = await res.json();
+        setHistoryData(data.map(d => d.totalRequests));
+        setHistoryErrors(data.map(d => d.errorRequests));
+        setHistoryLabels(data.map(d => {
+          const date = new Date(d.timeStamp);
+          return `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
+        }));
+      }
+    } catch {
+      // API may not be available yet
+    }
+  }, [projectId]);
+
+  // Fetch overview data
+  const fetchOverview = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/analytics/overview/${projectId}`);
+      if (res.ok) {
+        const data = await res.json();
+        setHourlyTotal(data.hourly?.totalRequests || 0);
+        setHourlyErrors(data.hourly?.errorRequests || 0);
+        setErrorGroupCount(data.errorGroupCount || 0);
+        setProjectName(data.project?.name || projectId);
+      }
+    } catch {
+      // API may not be available yet
+    }
+  }, [projectId]);
+
+  // Fetch health
+  const fetchHealth = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/health`);
+      if (res.ok) {
+        const data = await res.json();
+        setUptime(Math.floor(data.uptime || 0));
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  // WebSocket connection
   useEffect(() => {
-    // Open a persistent pipe to the Express engine running on Port 3000
-    const socket: Socket = io('http://localhost:3000', {
-      transports: ['websocket']
+    const socket: Socket = io(SOCKET_URL, {
+      transports: ['websocket'],
+      reconnection: true,
+      reconnectionDelay: 2000,
     });
 
     socket.on('connect', () => {
-      // Direct match to your server.ts: socket.on('subscribe', (projectId) => { ... })
-      // Subscribing to the benchmark project seeded by your backend function
-      socket.emit('subscribe', 'proj_bench_99');
+      setConnectionStatus('connected');
+      socket.emit('subscribe', projectId);
     });
 
-    // Direct match to your server.ts: io.to(projectId).emit('live-metrics', { ... })
+    socket.on('disconnect', () => {
+      setConnectionStatus('disconnected');
+    });
+
+    socket.on('reconnecting', () => {
+      setConnectionStatus('reconnecting');
+    });
+
+    socket.on('connect_error', () => {
+      setConnectionStatus('disconnected');
+    });
+
     socket.on('live-metrics', (data: { totalRequests: number; errorRequests: number }) => {
       setTotalRequests(data.totalRequests);
-      
-      const calculatedErrorRate = data.totalRequests > 0 
-        ? (data.errorRequests / data.totalRequests) * 100 
+      setErrorRequests(data.errorRequests);
+
+      const rate = data.totalRequests > 0
+        ? (data.errorRequests / data.totalRequests) * 100
         : 0;
-      setErrorRate(calculatedErrorRate);
-      
-      // Feed the real-time vector trendline
-      setChartHistory((prev) => [...prev.slice(1), data.totalRequests]);
+      setErrorRate(rate);
+
+      const now = new Date();
+      const label = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+
+      setChartHistory(prev => [...prev.slice(1), data.totalRequests]);
+      setChartLabels(prev => [...prev.slice(1), label]);
     });
 
     return () => {
       socket.disconnect();
     };
-  }, []);
+  }, [projectId]);
 
-  const generateSvgPath = () => {
-    const maxVal = Math.max(...chartHistory, 10);
-    const width = 500;
-    const height = 180;
-    const points = chartHistory.map((val, index) => {
-      const x = (index / (chartHistory.length - 1)) * width;
-      const y = height - (val / maxVal) * height;
-      return `${x},${y}`;
-    });
-    return `M ${points.join(' L ')}`;
+  // Periodic data fetching
+  useEffect(() => {
+    fetchHistory();
+    fetchOverview();
+    fetchHealth();
+
+    const historyInterval = setInterval(fetchHistory, 30000);
+    const overviewInterval = setInterval(fetchOverview, 15000);
+    const healthInterval = setInterval(fetchHealth, 10000);
+
+    return () => {
+      clearInterval(historyInterval);
+      clearInterval(overviewInterval);
+      clearInterval(healthInterval);
+    };
+  }, [fetchHistory, fetchOverview, fetchHealth]);
+
+  const formatUptime = (seconds: number) => {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = seconds % 60;
+    return `${h}h ${m}m ${s}s`;
+  };
+
+  const getErrorSeverity = (): 'normal' | 'warning' | 'critical' => {
+    if (errorRate > 25) return 'critical';
+    if (errorRate > 10) return 'warning';
+    return 'normal';
   };
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 font-sans selection:bg-violet-500/30 selection:text-violet-200">
-      <header className="border-b border-zinc-800 bg-zinc-900/40 backdrop-blur-md sticky top-0 z-50 px-6 py-4 flex items-center justify-between">
-        <div className="flex items-center space-x-3">
-          <div className="h-6 w-6 rounded bg-violet-600 flex items-center justify-center font-black text-xs text-white tracking-tighter">P</div>
-          <span className="font-semibold tracking-tight text-sm">PulseAPM</span>
-          <span className="text-xs px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 font-medium">Console</span>
+      <Header
+        connectionStatus={connectionStatus}
+        projectId={projectId}
+        onProjectChange={setProjectId}
+      />
+
+      <main className="max-w-7xl mx-auto p-5 space-y-5">
+        {/* Project title bar */}
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-lg font-semibold text-zinc-100 tracking-tight">
+              {projectName || projectId}
+            </h1>
+            <p className="text-[10px] text-zinc-500 font-mono mt-0.5">ID: {projectId}</p>
+          </div>
+          <div className="text-right">
+            <p className="text-[10px] text-zinc-500">Server Uptime</p>
+            <p className="text-xs text-zinc-400 font-mono">{formatUptime(uptime)}</p>
+          </div>
         </div>
-        <div className="flex items-center space-x-4 text-xs text-zinc-400">
-          <span className="flex items-center space-x-1.5">
-            <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
-            <span className="text-zinc-300 font-medium">Ingestion Online</span>
-          </span>
-          <div className="h-4 w-px bg-zinc-800"></div>
-          <button className="hover:text-zinc-100 transition-colors">Documentation</button>
-        </div>
-      </header>
 
-      <main className="max-w-7xl mx-auto p-6 space-y-6">
-        <section className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <div className="p-6 rounded-xl border border-zinc-800 bg-zinc-900/30 backdrop-blur-sm space-y-2">
-            <p className="text-xs font-medium text-zinc-400 tracking-wide uppercase">Minute Volumetric load</p>
-            <div className="flex items-baseline space-x-2">
-              <span className="text-4xl font-bold tracking-tight">{totalRequests}</span>
-              <span className="text-xs text-zinc-500 font-medium">total requests</span>
-            </div>
-            <p className="text-xs text-emerald-400 font-medium">Streaming project room: proj_bench_99</p>
-          </div>
-
-          <div className="p-6 rounded-xl border border-zinc-800 bg-zinc-900/30 backdrop-blur-sm space-y-2">
-            <p className="text-xs font-medium text-zinc-400 tracking-wide uppercase">Ingestion Latency</p>
-            <div className="flex items-baseline space-x-2">
-              <span className="text-4xl font-bold tracking-tight text-zinc-400">7.14</span>
-              <span className="text-xs text-zinc-500 font-medium">ms benchmark baseline</span>
-            </div>
-            <p className="text-xs text-zinc-500">Redis cache engine connection active</p>
-          </div>
-
-          <div className="p-6 rounded-xl border border-zinc-800 bg-zinc-900/30 backdrop-blur-sm space-y-2">
-            <p className="text-xs font-medium text-zinc-400 tracking-wide uppercase">Calculated Error Rate</p>
-            <div className="flex items-baseline space-x-2">
-              <span className="text-4xl font-bold tracking-tight text-zinc-100">{errorRate.toFixed(2)}</span>
-              <span className="text-xs text-zinc-500 font-medium">%</span>
-            </div>
-            <p className="text-xs text-zinc-500">Evaluating Kafka message failures</p>
-          </div>
+        {/* Stats grid */}
+        <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+          <StatCard
+            label="Live Requests (This Minute)"
+            value={totalRequests}
+            suffix="reqs"
+            format="number"
+            subtitle="Real-time via WebSocket stream"
+            trend={totalRequests > 0 ? 'up' : 'neutral'}
+          />
+          <StatCard
+            label="Error Rate"
+            value={errorRate}
+            suffix="%"
+            format="percent"
+            severity={getErrorSeverity()}
+            subtitle={`${errorRequests} errors this minute`}
+          />
+          <StatCard
+            label="Hourly Volume"
+            value={hourlyTotal}
+            suffix="total"
+            format="number"
+            subtitle={`${hourlyErrors} errors in last hour`}
+          />
+          <StatCard
+            label="Error Groups"
+            value={errorGroupCount}
+            suffix="unique"
+            format="number"
+            subtitle="Deduplicated error fingerprints"
+            severity={errorGroupCount > 20 ? 'warning' : 'normal'}
+          />
         </section>
 
-        <section className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-2 p-6 rounded-xl border border-zinc-800 bg-zinc-900/20 flex flex-col justify-between min-h-[350px]">
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="font-semibold text-sm">Real-time Ingestion Stream</h3>
-                <p className="text-xs text-zinc-500">Live minute delta updates via streaming sockets</p>
-              </div>
-              <span className="text-xs bg-zinc-800 px-2 py-1 rounded text-zinc-300 font-mono">Live</span>
-            </div>
-            
-            <div className="flex-1 my-4 border border-zinc-800/60 rounded-lg p-2 flex items-end bg-zinc-950/80 relative overflow-hidden h-44">
-              <svg className="w-full h-full overflow-visible" viewBox="0 0 500 180" preserveAspectRatio="none">
-                <defs>
-                  <linearGradient id="chartGlow" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#8b5cf6" stopOpacity="0.2"/>
-                    <stop offset="100%" stopColor="#8b5cf6" stopOpacity="0.0"/>
-                  </linearGradient>
-                </defs>
-                <path
-                  d={`${generateSvgPath()} L 500,180 L 0,180 Z`}
-                  fill="url(#chartGlow)"
-                  className="transition-all duration-300 ease-in-out"
-                />
-                <path
-                  d={generateSvgPath()}
-                  fill="none"
-                  stroke="#8b5cf6"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  className="transition-all duration-300 ease-in-out"
-                />
-              </svg>
-            </div>
+        {/* Charts + Errors grid */}
+        <section className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+          <div className="lg:col-span-2 space-y-5">
+            <LiveChart
+              data={chartHistory}
+              labels={chartLabels}
+              title="Real-time Ingestion Stream"
+              subtitle="Live second-by-second request volume via WebSocket"
+            />
+            {historyData.length > 0 && (
+              <LiveChart
+                data={historyData}
+                labels={historyLabels}
+                title="Historical Request Volume"
+                subtitle="Aggregated minute-by-minute summaries from PostgreSQL"
+              />
+            )}
           </div>
 
-          <div className="p-6 rounded-xl border border-zinc-800 bg-zinc-900/20 flex flex-col min-h-[350px]">
-            <h3 className="font-semibold text-sm mb-1">Recent Ingress Exceptions</h3>
-            <p className="text-xs text-zinc-500 mb-4">Latest unhandled crash payloads caught by SDK</p>
-
-            <div className="flex-1 space-y-2 overflow-y-auto pr-1">
-              {exceptions.map((item) => (
-                <div 
-                  key={item.id} 
-                  className="p-3 rounded-lg bg-zinc-900/60 border border-zinc-800/80 hover:border-zinc-700 transition-colors cursor-pointer group"
-                >
-                  <div className="flex items-center justify-between text-xs mb-1">
-                    <span className="font-mono text-violet-400 font-medium">{item.type}</span>
-                    <span className="text-zinc-500">{item.timeAgo}</span>
-                  </div>
-                  <p className="text-xs text-zinc-300 truncate font-medium">{item.message}</p>
-                  <p className="text-[10px] text-zinc-500 font-mono mt-1">{item.location}</p>
-                </div>
-              ))}
-            </div>
-          </div>
+          <ErrorPanel
+            projectId={projectId}
+            apiBase={API_BASE}
+          />
         </section>
+
+        {/* Footer */}
+        <footer className="border-t border-zinc-800/50 pt-4 pb-6 flex items-center justify-between text-[10px] text-zinc-600">
+          <span>PulseAPM v1.0 • Kafka → Redis → PostgreSQL → S3 Pipeline</span>
+          <span className="font-mono">ws://{SOCKET_URL.replace('http://', '')}</span>
+        </footer>
       </main>
     </div>
   );
